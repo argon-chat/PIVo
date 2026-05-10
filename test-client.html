@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PIVo Agent Test Client</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #0a0a0a; color: #e0e0e0; padding: 24px; line-height: 1.5; }
+h1 { color: #4ade80; margin-bottom: 8px; font-size: 1.4em; }
+h2 { color: #888; font-size: 0.9em; margin-bottom: 16px; }
+.panel { background: #111; border: 1px solid #222; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+.status { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.8em; }
+.status.connected { background: #064e3b; color: #4ade80; }
+.status.disconnected { background: #450a0a; color: #f87171; }
+.status.connecting { background: #422006; color: #fbbf24; }
+button { background: #1f2937; color: #e0e0e0; border: 1px solid #374151; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-family: monospace; font-size: 0.85em; margin: 4px 4px 4px 0; }
+button:hover { background: #374151; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+input, textarea { background: #1a1a1a; color: #e0e0e0; border: 1px solid #333; border-radius: 6px; padding: 8px; font-family: monospace; font-size: 0.85em; width: 100%; }
+input { margin-bottom: 8px; }
+textarea { min-height: 120px; resize: vertical; }
+label { display: block; color: #888; font-size: 0.8em; margin-bottom: 4px; margin-top: 8px; }
+.log { background: #000; border: 1px solid #222; border-radius: 6px; padding: 12px; max-height: 300px; overflow-y: auto; font-size: 0.8em; white-space: pre-wrap; word-break: break-all; }
+.log-entry { margin-bottom: 4px; }
+.log-entry.sent { color: #60a5fa; }
+.log-entry.recv { color: #4ade80; }
+.log-entry.error { color: #f87171; }
+.log-entry.info { color: #888; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+.certs-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.8em; }
+.certs-table th, .certs-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #222; }
+.certs-table th { color: #888; }
+select { background: #1a1a1a; color: #e0e0e0; border: 1px solid #333; border-radius: 6px; padding: 8px; font-family: monospace; width: 100%; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<h1>PIVo Agent Test Client</h1>
+<h2>WebSocket interface for YubiKey PIV operations</h2>
+
+<div class="panel">
+  <span id="status" class="status disconnected">Disconnected</span>
+  <button onclick="connect()" id="btn-connect">Connect</button>
+  <button onclick="disconnect()" id="btn-disconnect" disabled>Disconnect</button>
+</div>
+
+<div class="grid">
+  <div>
+    <div class="panel">
+      <strong>YubiKey Selection</strong>
+      <div style="margin-top:12px">
+        <button onclick="send('list-readers')">List Readers</button>
+        <label for="serial-input">Serial number:</label>
+        <input type="text" id="serial-input" placeholder="e.g. 12345678">
+        <button onclick="selectReader()">Select Reader</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <strong>Certificates</strong>
+      <div style="margin-top:12px">
+        <button onclick="send('list-certificates')">List Certificates</button>
+        <div id="certs-result"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <strong>Generate Key + CSR</strong>
+      <div style="margin-top:12px">
+        <label>Slot:</label>
+        <select id="slot-select">
+          <option value="9a">9a (Authentication)</option>
+          <option value="9c" selected>9c (Digital Signature)</option>
+          <option value="9d">9d (Key Management)</option>
+          <option value="9e">9e (Card Authentication)</option>
+        </select>
+        <label>Algorithm:</label>
+        <select id="alg-select">
+          <option value="RSA2048" selected>RSA2048</option>
+          <option value="RSA4096">RSA4096</option>
+          <option value="EC256">EC256</option>
+          <option value="EC384">EC384</option>
+          <option value="Ed25519">Ed25519</option>
+        </select>
+        <label>PIN:</label>
+        <input type="password" id="pin-input" placeholder="123456">
+        <label>Management Key (hex):</label>
+        <input type="text" id="mgmt-key-input" placeholder="010203040506070801020304050607080102030405060708">
+        <label>Subject CN:</label>
+        <input type="text" id="cn-input" placeholder="operator:user@example.com">
+        <button onclick="generateKey()">Generate Key</button>
+        <button onclick="createCSR()">Create CSR</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <strong>Import Certificate</strong>
+      <div style="margin-top:12px">
+        <label>Slot:</label>
+        <select id="import-slot-select">
+          <option value="9a">9a</option>
+          <option value="9c" selected>9c</option>
+          <option value="9d">9d</option>
+          <option value="9e">9e</option>
+        </select>
+        <label>Certificate PEM:</label>
+        <textarea id="cert-pem-input" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"></textarea>
+        <label>Management Key (hex):</label>
+        <input type="text" id="import-mgmt-key" placeholder="010203040506070801020304050607080102030405060708">
+        <button onclick="importCert()" style="margin-top:8px">Import Certificate</button>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <strong>Message Log</strong>
+      <div id="log" class="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PORTS = [9283, 10293, 14582, 17383];
+let ws = null;
+let msgId = 0;
+
+function setStatus(state, text) {
+  const el = document.getElementById('status');
+  el.className = 'status ' + state;
+  el.textContent = text;
+  document.getElementById('btn-connect').disabled = (state === 'connected' || state === 'connecting');
+  document.getElementById('btn-disconnect').disabled = (state !== 'connected');
+}
+
+function addLog(type, text) {
+  const log = document.getElementById('log');
+  const entry = document.createElement('div');
+  entry.className = 'log-entry ' + type;
+  const time = new Date().toLocaleTimeString();
+  entry.textContent = `[${time}] ${text}`;
+  log.appendChild(entry);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function connect() {
+  setStatus('connecting', 'Connecting...');
+  
+  for (const port of PORTS) {
+    try {
+      addLog('info', `Trying port ${port}...`);
+      const connected = await tryConnect(port);
+      if (connected) return;
+    } catch (e) {
+      addLog('info', `Port ${port} failed: ${e.message}`);
+    }
+  }
+  
+  setStatus('disconnected', 'Disconnected');
+  addLog('error', 'Could not connect to PIVo agent on any port.');
+}
+
+function tryConnect(port) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error('timeout'));
+    }, 2000);
+
+    socket.onopen = () => {
+      clearTimeout(timeout);
+      ws = socket;
+      setStatus('connected', `Connected (port ${port})`);
+      addLog('info', `Connected to ws://127.0.0.1:${port}/ws`);
+      
+      // Auto-pair
+      sendRaw('pair', {});
+      resolve(true);
+    };
+
+    socket.onerror = () => {
+      clearTimeout(timeout);
+      reject(new Error('connection refused'));
+    };
+
+    socket.onclose = () => {
+      if (ws === socket) {
+        ws = null;
+        setStatus('disconnected', 'Disconnected');
+        addLog('info', 'Connection closed.');
+      }
+    };
+
+    socket.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      if (data.error) {
+        addLog('error', `← [${data.id}] ERROR ${data.error.code}: ${data.error.message}`);
+      } else {
+        addLog('recv', `← [${data.id}] ${JSON.stringify(data.result, null, 2)}`);
+        handleResponse(data);
+      }
+    };
+  });
+}
+
+function disconnect() {
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+}
+
+function sendRaw(method, params) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addLog('error', 'Not connected.');
+    return;
+  }
+  msgId++;
+  const msg = { id: msgId, method, params };
+  addLog('sent', `→ [${msgId}] ${method} ${JSON.stringify(params)}`);
+  ws.send(JSON.stringify(msg));
+}
+
+function send(method) {
+  sendRaw(method, {});
+}
+
+function selectReader() {
+  const serial = parseInt(document.getElementById('serial-input').value);
+  if (!serial) { addLog('error', 'Enter a serial number.'); return; }
+  sendRaw('select-reader', { serial });
+}
+
+function generateKey() {
+  sendRaw('generate-key', {
+    slot: document.getElementById('slot-select').value,
+    algorithm: document.getElementById('alg-select').value,
+    pin: document.getElementById('pin-input').value,
+    managementKey: document.getElementById('mgmt-key-input').value,
+  });
+}
+
+function createCSR() {
+  sendRaw('create-csr', {
+    slot: document.getElementById('slot-select').value,
+    pin: document.getElementById('pin-input').value,
+    subject: { CN: document.getElementById('cn-input').value },
+  });
+}
+
+function importCert() {
+  sendRaw('import-certificate', {
+    slot: document.getElementById('import-slot-select').value,
+    certificate: document.getElementById('cert-pem-input').value,
+    managementKey: document.getElementById('import-mgmt-key').value,
+  });
+}
+
+function handleResponse(data) {
+  // If pairing requires PIN, prompt user
+  if (data.result && data.result.status === 'pin-required') {
+    const pin = prompt('Enter the PIN code shown in the PIVo agent console:');
+    if (pin) {
+      sendRaw('pair', { pin });
+    }
+    return;
+  }
+  // If list-certificates, render table
+  if (data.result && data.result['9a'] !== undefined) {
+    renderCerts(data.result);
+  }
+}
+
+function renderCerts(certs) {
+  const container = document.getElementById('certs-result');
+  let html = '<table class="certs-table"><tr><th>Slot</th><th>Subject</th><th>Expires</th></tr>';
+  for (const [slot, info] of Object.entries(certs)) {
+    if (info) {
+      html += `<tr><td>${slot}</td><td>${info.subject}</td><td>${info.notAfter}</td></tr>`;
+    } else {
+      html += `<tr><td>${slot}</td><td style="color:#555">empty</td><td></td></tr>`;
+    }
+  }
+  html += '</table>';
+  container.innerHTML = html;
+}
+</script>
+</body>
+</html>
