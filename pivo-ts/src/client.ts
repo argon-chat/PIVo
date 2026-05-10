@@ -234,11 +234,22 @@ export class PivoAgent {
 }
 
 export class PivoError extends Error {
+  static readonly PIN_REQUIRED = 4011;
+  static readonly SLOT_OCCUPIED = 409;
+
   constructor(
     public readonly code: number,
     message: string
   ) {
     super(message);
     this.name = "PivoError";
+  }
+
+  get pinRequired(): boolean {
+    return this.code === PivoError.PIN_REQUIRED;
+  }
+
+  get slotOccupied(): boolean {
+    return this.code === PivoError.SLOT_OCCUPIED;
   }
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 
@@ -160,6 +161,9 @@ func (h *Handler) handleGenerateKey(req Request) Response {
 
 	pubPEM, err := yubikey.GenerateKey(yk, params.Slot, params.Algorithm, params.ManagementKey, params.PIN)
 	if err != nil {
+		if errors.Is(err, yubikey.ErrPINRequired) {
+			return Response{ID: req.ID, Error: &RpcError{Code: 4011, Message: err.Error()}}
+		}
 		return Response{ID: req.ID, Error: &RpcError{Code: 500, Message: err.Error()}}
 	}
 	return Response{ID: req.ID, Result: map[string]string{"publicKey": pubPEM}}
@@ -211,6 +215,9 @@ func (h *Handler) handleImportCertificate(req Request) Response {
 	}
 
 	if err := yubikey.ImportCertificate(yk, params.Slot, params.Certificate, params.ManagementKey, params.PIN); err != nil {
+		if errors.Is(err, yubikey.ErrPINRequired) {
+			return Response{ID: req.ID, Error: &RpcError{Code: 4011, Message: err.Error()}}
+		}
 		return Response{ID: req.ID, Error: &RpcError{Code: 500, Message: err.Error()}}
 	}
 	return Response{ID: req.ID, Result: map[string]string{"status": "ok"}}

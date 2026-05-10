@@ -48,29 +48,40 @@ func parseManagementKey(hexKey string) ([]byte, error) {
 	return b, nil
 }
 
-// resolveManagementKey returns the management key to use. If mgmtKeyHex is provided,
-// it decodes that. Otherwise it tries to retrieve the PIN-protected management key
-// from the YubiKey metadata. Falls back to DefaultManagementKey if metadata is unavailable.
+// ErrPINRequired is returned when the management key is PIN-protected but no PIN was provided.
+var ErrPINRequired = fmt.Errorf("PIN required: management key is protected by PIN")
+
+// resolveManagementKey returns the management key to use.
+// Priority: explicit hex key > PIN-protected key from metadata > default key.
 func resolveManagementKey(yk *pivlib.YubiKey, mgmtKeyHex, pin string) ([]byte, error) {
 	if mgmtKeyHex != "" {
 		return parseManagementKey(mgmtKeyHex)
 	}
 
-	if pin == "" {
-		pin = DefaultPIN
+	// Try PIN-protected management key retrieval.
+	// Attempt with user PIN first, then default PIN.
+	pins := []string{}
+	if pin != "" {
+		pins = append(pins, pin)
 	}
-	// Try to retrieve the PIN-protected management key from metadata.
-	meta, err := yk.Metadata(pin)
-	if err == nil && meta.ManagementKey != nil {
-		return *meta.ManagementKey, nil
-	}
-
-	// If PIN was explicitly provided (non-default) and metadata failed, the PIN is wrong.
-	if pin != DefaultPIN && err != nil {
-		return nil, fmt.Errorf("failed to unlock PIN-protected management key (wrong PIN?): %w", err)
+	if pin != DefaultPIN {
+		pins = append(pins, DefaultPIN)
 	}
 
-	// Fallback to default management key (works only if key was never changed).
+	for _, p := range pins {
+		meta, err := yk.Metadata(p)
+		if err == nil && meta.ManagementKey != nil {
+			return *meta.ManagementKey, nil
+		}
+	}
+
+	// No PIN-protected key found. If the user provided a PIN, they expected
+	// PIN-protected mode — return an explicit error.
+	if pin != "" {
+		return nil, ErrPINRequired
+	}
+
+	// No PIN provided, no PIN-protected key — fall back to default management key.
 	return DefaultManagementKey, nil
 }
 
