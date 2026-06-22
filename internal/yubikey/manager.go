@@ -40,8 +40,36 @@ func listCardsWithRetry() ([]string, error) {
 }
 
 type ReaderInfo struct {
-	Name   string `json:"name"`
+	Name   string `json:"name"`   // raw PC/SC reader name, e.g. "Yubico YubiKey OTP+FIDO+CCID 0"
+	Model  string `json:"model"`  // friendly device name, e.g. "YubiKey 5 USB-C Nano"
 	Serial uint32 `json:"serial"`
+}
+
+// yubiKeySeries maps the firmware major version to the YubiKey product series.
+func yubiKeySeries(v piv.Version) string {
+	switch {
+	case v.Major >= 5:
+		return "YubiKey 5"
+	case v.Major == 4:
+		return "YubiKey 4"
+	case v.Major == 3:
+		return "YubiKey NEO"
+	case v.Major > 0:
+		return "YubiKey"
+	default:
+		return "YubiKey"
+	}
+}
+
+// deviceModel builds a human-friendly device name from the firmware version and
+// (when available) the physical form factor, e.g. "YubiKey 5 USB-C Nano".
+// Falls back to just the series if the form factor cannot be read.
+func deviceModel(yk *piv.YubiKey) string {
+	series := yubiKeySeries(yk.Version())
+	if ff, err := yk.FormFactor(); err == nil && ff != 0 {
+		return fmt.Sprintf("%s %s", series, ff.String())
+	}
+	return series
 }
 
 type Manager struct {
@@ -49,6 +77,7 @@ type Manager struct {
 	selected *piv.YubiKey
 	serial   uint32
 	card     string // PC/SC reader name of the currently selected key
+	model    string // friendly model name of the currently selected key
 }
 
 func NewManager() *Manager {
@@ -70,9 +99,9 @@ func (m *Manager) ListReaders() ([]ReaderInfo, error) {
 	for _, card := range cards {
 		// The currently-selected card is held open by us with exclusive access, so
 		// re-opening it here would fail and drop it from the list. Report it from the
-		// serial we already know instead.
+		// info we cached at selection time instead.
 		if m.selected != nil && card == m.card {
-			readers = append(readers, ReaderInfo{Name: card, Serial: m.serial})
+			readers = append(readers, ReaderInfo{Name: card, Model: m.model, Serial: m.serial})
 			continue
 		}
 		yk, err := openCardWithRetry(card)
@@ -84,7 +113,7 @@ func (m *Manager) ListReaders() ([]ReaderInfo, error) {
 			yk.Close()
 			continue
 		}
-		readers = append(readers, ReaderInfo{Name: card, Serial: serial})
+		readers = append(readers, ReaderInfo{Name: card, Model: deviceModel(yk), Serial: serial})
 		yk.Close()
 	}
 	return readers, nil
@@ -100,6 +129,7 @@ func (m *Manager) SelectReader(serial uint32) error {
 		m.selected = nil
 		m.serial = 0
 		m.card = ""
+		m.model = ""
 	}
 
 	cards, err := listCardsWithRetry()
@@ -118,6 +148,9 @@ func (m *Manager) SelectReader(serial uint32) error {
 			continue
 		}
 		if s == serial {
+			// Cache the friendly model while we have the handle open, before any
+			// PIV operations, so list-readers can report it without reopening.
+			m.model = deviceModel(yk)
 			m.selected = yk
 			m.serial = serial
 			m.card = card
@@ -151,5 +184,6 @@ func (m *Manager) Close() {
 		m.selected = nil
 		m.serial = 0
 		m.card = ""
+		m.model = ""
 	}
 }

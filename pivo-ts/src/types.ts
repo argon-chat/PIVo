@@ -10,7 +10,10 @@ export type Algorithm =
   | "Ed25519";
 
 export interface ReaderInfo {
+  /** Raw PC/SC reader name, e.g. "Yubico YubiKey OTP+FIDO+CCID 0". */
   name: string;
+  /** Friendly device name, e.g. "YubiKey 5 USB-C Nano". May be empty if it can't be determined. */
+  model?: string;
   serial: number;
 }
 
