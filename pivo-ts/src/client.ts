@@ -108,7 +108,7 @@ export class PivoAgent {
       this.pending.delete(data.id);
 
       if (data.error) {
-        pending.reject(new PivoError(data.error.code, data.error.message));
+        pending.reject(new PivoError(data.error.code, data.error.message, data.error.data));
       } else {
         pending.resolve(data.result);
       }
@@ -231,22 +231,54 @@ export class PivoAgent {
       force: params.force ?? false,
     });
   }
+
+  // --- PIN status ---
+
+  /** Returns how many PIN attempts remain before the key is blocked. Read-only — does not consume an attempt. */
+  async getPinRetries(): Promise<number> {
+    const result = await this.call<{ retries: number }>("get-pin-retries");
+    return result.retries;
+  }
 }
 
 export class PivoError extends Error {
   static readonly PIN_REQUIRED = 4011;
+  static readonly INVALID_PIN = 4012;
+  static readonly PIN_BLOCKED = 4013;
   static readonly SLOT_OCCUPIED = 409;
 
   constructor(
     public readonly code: number,
-    message: string
+    message: string,
+    public readonly data?: { retries?: number } & Record<string, unknown>
   ) {
     super(message);
     this.name = "PivoError";
   }
 
+  /** A PIN was required but not provided. Safe to retry once a PIN is supplied. */
   get pinRequired(): boolean {
     return this.code === PivoError.PIN_REQUIRED;
+  }
+
+  /** The PIN was wrong. Do NOT auto-retry — each attempt decrements the retry counter. */
+  get invalidPin(): boolean {
+    return this.code === PivoError.INVALID_PIN;
+  }
+
+  /** The PIN is blocked (no retries left); a PUK reset is required. */
+  get pinBlocked(): boolean {
+    return this.code === PivoError.PIN_BLOCKED;
+  }
+
+  /** True for any PIN-attempt-consuming error — callers must not blindly retry these. */
+  get isPinError(): boolean {
+    return this.pinRequired || this.invalidPin || this.pinBlocked;
+  }
+
+  /** Remaining PIN attempts when known (invalid-PIN / blocked errors). */
+  get retriesRemaining(): number | undefined {
+    return this.data?.retries;
   }
 
   get slotOccupied(): boolean {

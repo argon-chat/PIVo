@@ -6,6 +6,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 
 	pivlib "github.com/go-piv/piv-go/v2/piv"
@@ -48,40 +49,98 @@ func parseManagementKey(hexKey string) ([]byte, error) {
 	return b, nil
 }
 
-// ErrPINRequired is returned when the management key is PIN-protected but no PIN was provided.
-var ErrPINRequired = fmt.Errorf("PIN required: management key is protected by PIN")
+// ErrPINRequired is returned when an operation needs a PIN but none was provided.
+// We never substitute a guessed/default PIN, because a wrong attempt decrements the
+// YubiKey PIN retry counter and can permanently block the key.
+var ErrPINRequired = fmt.Errorf("PIN required: a YubiKey PIN must be provided for this operation")
+
+// ErrPINBlocked is returned when the PIN retry counter is already exhausted.
+// The key cannot be unlocked without the PUK.
+var ErrPINBlocked = fmt.Errorf("PIN is blocked: no retries remaining, a PUK reset is required")
+
+// InvalidPINError is returned when a PIN verification fails. It carries the number
+// of attempts remaining so the caller can warn the user before the key locks.
+type InvalidPINError struct {
+	Retries int
+}
+
+func (e *InvalidPINError) Error() string {
+	if e.Retries <= 0 {
+		return "invalid PIN: the key is now blocked, a PUK reset is required"
+	}
+	if e.Retries == 1 {
+		return "invalid PIN: 1 attempt remaining before the key is blocked"
+	}
+	return fmt.Sprintf("invalid PIN: %d attempts remaining", e.Retries)
+}
+
+// PINRetries reports how many PIN attempts remain. This is a read-only query and
+// does NOT consume an attempt.
+func PINRetries(yk *pivlib.YubiKey) (int, error) {
+	return yk.Retries()
+}
+
+// ensurePINUsable refuses to attempt a PIN verification when the counter is already
+// exhausted, so we never waste the "last" call on an already-blocked key. If the
+// retry count cannot be read we proceed (the operation itself will surface the error).
+func ensurePINUsable(yk *pivlib.YubiKey) error {
+	n, err := yk.Retries()
+	if err != nil {
+		return nil
+	}
+	if n <= 0 {
+		return ErrPINBlocked
+	}
+	return nil
+}
+
+// classifyPINError converts a low-level piv auth error into an InvalidPINError that
+// preserves the remaining retry count. Non-PIN errors are returned unchanged.
+func classifyPINError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ae pivlib.AuthErr
+	if errors.As(err, &ae) {
+		return &InvalidPINError{Retries: ae.Retries}
+	}
+	return err
+}
 
 // resolveManagementKey returns the management key to use.
 // Priority: explicit hex key > PIN-protected key from metadata > default key.
+//
+// IMPORTANT: we only probe the management-key metadata with the PIN the caller
+// supplied. We never fall back to guessing the default PIN, because each wrong
+// PIN verification decrements the retry counter and can block the key.
 func resolveManagementKey(yk *pivlib.YubiKey, mgmtKeyHex, pin string) ([]byte, error) {
 	if mgmtKeyHex != "" {
 		return parseManagementKey(mgmtKeyHex)
 	}
 
-	// Try PIN-protected management key retrieval.
-	// Attempt with user PIN first, then default PIN.
-	pins := []string{}
-	if pin != "" {
-		pins = append(pins, pin)
-	}
-	if pin != DefaultPIN {
-		pins = append(pins, DefaultPIN)
+	// Without a PIN we cannot safely detect a PIN-protected management key
+	// (probing would require guessing). Assume the default management key; if the
+	// key is actually PIN-protected the operation fails on management-key auth,
+	// which does NOT consume a PIN attempt.
+	if pin == "" {
+		return DefaultManagementKey, nil
 	}
 
-	for _, p := range pins {
-		meta, err := yk.Metadata(p)
-		if err == nil && meta.ManagementKey != nil {
-			return *meta.ManagementKey, nil
-		}
+	// Reading PIN-protected metadata verifies the PIN, so guard against a blocked key first.
+	if err := ensurePINUsable(yk); err != nil {
+		return nil, err
 	}
 
-	// No PIN-protected key found. If the user provided a PIN, they expected
-	// PIN-protected mode — return an explicit error.
-	if pin != "" {
-		return nil, ErrPINRequired
+	meta, err := yk.Metadata(pin)
+	if err != nil {
+		// Surface a wrong-PIN error with the remaining retry count; do not guess further.
+		return nil, classifyPINError(err)
+	}
+	if meta.ManagementKey != nil {
+		return *meta.ManagementKey, nil
 	}
 
-	// No PIN provided, no PIN-protected key — fall back to default management key.
+	// PIN is valid but the management key is not PIN-protected — use the default key.
 	return DefaultManagementKey, nil
 }
 
@@ -154,7 +213,7 @@ func GenerateKey(yk *pivlib.YubiKey, slotStr, algStr, mgmtKeyHex, pin string) (s
 
 	pub, err := yk.GenerateKey(mgmtKey, slot, opts)
 	if err != nil {
-		return "", fmt.Errorf("generate key: %w", err)
+		return "", fmt.Errorf("generate key: %w", classifyPINError(err))
 	}
 
 	pubDER, err := x509.MarshalPKIXPublicKey(pub)
@@ -176,6 +235,15 @@ func CreateCSR(yk *pivlib.YubiKey, slotStr, pin string, subject SubjectParams) (
 		return "", err
 	}
 
+	// Signing the CSR requires a PIN verification. Never guess a default PIN —
+	// a wrong attempt decrements the retry counter and can block the key.
+	if pin == "" {
+		return "", ErrPINRequired
+	}
+	if err := ensurePINUsable(yk); err != nil {
+		return "", err
+	}
+
 	cert, err := yk.Certificate(slot)
 	if err != nil {
 		// No cert in slot — try to get the attestation cert to find the public key
@@ -185,12 +253,9 @@ func CreateCSR(yk *pivlib.YubiKey, slotStr, pin string, subject SubjectParams) (
 		}
 	}
 
-	if pin == "" {
-		pin = DefaultPIN
-	}
 	priv, err := yk.PrivateKey(slot, cert.PublicKey, pivlib.KeyAuth{PIN: pin})
 	if err != nil {
-		return "", fmt.Errorf("access private key: %w", err)
+		return "", fmt.Errorf("access private key: %w", classifyPINError(err))
 	}
 
 	name := pkix.Name{}
@@ -208,9 +273,11 @@ func CreateCSR(yk *pivlib.YubiKey, slotStr, pin string, subject SubjectParams) (
 		Subject: name,
 	}
 
+	// PIN verification for a PINPolicyOnce key happens lazily on the first signing
+	// operation, so a wrong PIN surfaces here — classify it to expose retries.
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, template, priv)
 	if err != nil {
-		return "", fmt.Errorf("create CSR: %w", err)
+		return "", fmt.Errorf("create CSR: %w", classifyPINError(err))
 	}
 
 	csrPEM := pem.EncodeToMemory(&pem.Block{

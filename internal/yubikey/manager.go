@@ -3,9 +3,25 @@ package yubikey
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/go-piv/piv-go/v2/piv"
 )
+
+// openCardWithRetry opens a smart card, retrying a few times on transient PC/SC
+// failures (reader busy, card just inserted, another process holding the handle).
+func openCardWithRetry(card string) (*piv.YubiKey, error) {
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		yk, err := piv.Open(card)
+		if err == nil {
+			return yk, nil
+		}
+		lastErr = err
+		time.Sleep(150 * time.Millisecond)
+	}
+	return nil, lastErr
+}
 
 type ReaderInfo struct {
 	Name   string `json:"name"`
@@ -31,7 +47,7 @@ func (m *Manager) ListReaders() ([]ReaderInfo, error) {
 
 	var readers []ReaderInfo
 	for _, card := range cards {
-		yk, err := piv.Open(card)
+		yk, err := openCardWithRetry(card)
 		if err != nil {
 			continue
 		}
@@ -66,7 +82,7 @@ func (m *Manager) SelectReader(serial uint32) error {
 	}
 
 	for _, card := range cards {
-		yk, err := piv.Open(card)
+		yk, err := openCardWithRetry(card)
 		if err != nil {
 			continue
 		}

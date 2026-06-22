@@ -25,8 +25,37 @@ type Response struct {
 }
 
 type RpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// RPC error codes for PIN-related conditions. Clients use these to avoid blindly
+// retrying PIN operations (which would burn the YubiKey's retry counter).
+const (
+	codePINRequired = 4011 // operation needs a PIN but none was provided
+	codeInvalidPIN  = 4012 // wrong PIN; Data carries {"retries": n}
+	codePINBlocked  = 4013 // PIN retry counter exhausted; PUK reset required
+)
+
+// pinErrorResponse maps a yubikey PIN error to a structured RPC error. Returns
+// false if the error is not PIN-related.
+func pinErrorResponse(id int, err error) (Response, bool) {
+	var invalid *yubikey.InvalidPINError
+	switch {
+	case errors.As(err, &invalid):
+		return Response{ID: id, Error: &RpcError{
+			Code:    codeInvalidPIN,
+			Message: invalid.Error(),
+			Data:    map[string]int{"retries": invalid.Retries},
+		}}, true
+	case errors.Is(err, yubikey.ErrPINBlocked):
+		return Response{ID: id, Error: &RpcError{Code: codePINBlocked, Message: err.Error(), Data: map[string]int{"retries": 0}}}, true
+	case errors.Is(err, yubikey.ErrPINRequired):
+		return Response{ID: id, Error: &RpcError{Code: codePINRequired, Message: err.Error()}}, true
+	default:
+		return Response{}, false
+	}
 }
 
 type Handler struct {
@@ -70,6 +99,8 @@ func (h *Handler) Handle(origin string, raw []byte) Response {
 		return h.handleCreateCSR(req)
 	case "import-certificate":
 		return h.handleImportCertificate(req)
+	case "get-pin-retries":
+		return h.handleGetPinRetries(req)
 	default:
 		return Response{ID: req.ID, Error: &RpcError{Code: 404, Message: fmt.Sprintf("unknown method %q", req.Method)}}
 	}
@@ -161,8 +192,8 @@ func (h *Handler) handleGenerateKey(req Request) Response {
 
 	pubPEM, err := yubikey.GenerateKey(yk, params.Slot, params.Algorithm, params.ManagementKey, params.PIN)
 	if err != nil {
-		if errors.Is(err, yubikey.ErrPINRequired) {
-			return Response{ID: req.ID, Error: &RpcError{Code: 4011, Message: err.Error()}}
+		if resp, ok := pinErrorResponse(req.ID, err); ok {
+			return resp
 		}
 		return Response{ID: req.ID, Error: &RpcError{Code: 500, Message: err.Error()}}
 	}
@@ -186,6 +217,9 @@ func (h *Handler) handleCreateCSR(req Request) Response {
 
 	csrPEM, err := yubikey.CreateCSR(yk, params.Slot, params.PIN, params.Subject)
 	if err != nil {
+		if resp, ok := pinErrorResponse(req.ID, err); ok {
+			return resp
+		}
 		return Response{ID: req.ID, Error: &RpcError{Code: 500, Message: err.Error()}}
 	}
 	return Response{ID: req.ID, Result: map[string]string{"csr": csrPEM}}
@@ -215,10 +249,22 @@ func (h *Handler) handleImportCertificate(req Request) Response {
 	}
 
 	if err := yubikey.ImportCertificate(yk, params.Slot, params.Certificate, params.ManagementKey, params.PIN); err != nil {
-		if errors.Is(err, yubikey.ErrPINRequired) {
-			return Response{ID: req.ID, Error: &RpcError{Code: 4011, Message: err.Error()}}
+		if resp, ok := pinErrorResponse(req.ID, err); ok {
+			return resp
 		}
 		return Response{ID: req.ID, Error: &RpcError{Code: 500, Message: err.Error()}}
 	}
 	return Response{ID: req.ID, Result: map[string]string{"status": "ok"}}
+}
+
+func (h *Handler) handleGetPinRetries(req Request) Response {
+	yk := h.ykMgr.Selected()
+	if yk == nil {
+		return Response{ID: req.ID, Error: &RpcError{Code: 404, Message: "no YubiKey selected"}}
+	}
+	retries, err := yubikey.PINRetries(yk)
+	if err != nil {
+		return Response{ID: req.ID, Error: &RpcError{Code: 500, Message: err.Error()}}
+	}
+	return Response{ID: req.ID, Result: map[string]int{"retries": retries}}
 }

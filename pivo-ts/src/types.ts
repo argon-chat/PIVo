@@ -32,6 +32,8 @@ export interface SubjectParams {
 export interface RpcError {
   code: number;
   message: string;
+  /** Structured payload for some errors, e.g. `{ retries }` for invalid-PIN. */
+  data?: { retries?: number } & Record<string, unknown>;
 }
 
 export interface PivoEvents {

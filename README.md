@@ -107,11 +107,18 @@ await agent.importCertificate({
 
 ```typescript
 try {
-  await agent.generateKey({ slot: "9a" });
+  await agent.createCSR({ slot: "9c", subject: { CN: "operator" }, pin });
 } catch (e) {
   if (e instanceof PivoError) {
-    if (e.pinRequired) {
-      // Management key is PIN-protected, need to provide PIN
+    if (e.isPinError) {
+      // PIN-attempt-consuming error — do NOT auto-retry, it can block the key.
+      if (e.pinBlocked) {
+        // PIN exhausted, a PUK reset is required
+      } else if (e.invalidPin) {
+        // Wrong PIN — warn the user; e.retriesRemaining shows attempts left
+      } else if (e.pinRequired) {
+        // No PIN was provided; prompt for it
+      }
     }
     if (e.slotOccupied) {
       // Slot already has a certificate, use force: true to overwrite
@@ -120,11 +127,19 @@ try {
 }
 ```
 
+> **PIN safety:** the agent never guesses or substitutes a default PIN. Operations
+> that verify the PIN (`generate-key`, `create-csr`, `import-certificate`) require an
+> explicit `pin` and fail fast when the retry counter is exhausted, so a missing or
+> wrong PIN cannot silently burn attempts and block the key. Clients must not
+> auto-retry `4012`/`4013` errors. Use `get-pin-retries` to show remaining attempts.
+
 ### Error codes
 
 | Code | Constant | Meaning |
 |------|----------|---------|
-| `4011` | `PivoError.PIN_REQUIRED` | Management key is PIN-protected, provide `pin` parameter |
+| `4011` | `PivoError.PIN_REQUIRED` | Operation needs a PIN but none was provided |
+| `4012` | `PivoError.INVALID_PIN` | Wrong PIN; `error.data.retries` / `e.retriesRemaining` holds attempts left. Do **not** auto-retry |
+| `4013` | `PivoError.PIN_BLOCKED` | PIN retry counter exhausted, a PUK reset is required |
 | `409` | `PivoError.SLOT_OCCUPIED` | Slot already contains a certificate, use `force: true` |
 | `400` | — | Invalid parameters |
 | `404` | — | No YubiKey selected |
@@ -149,8 +164,9 @@ agent.on("error", (err) => console.error(err));
 | `select-reader` | Select a reader by serial number |
 | `list-certificates` | Read certificates from all 4 PIV slots |
 | `generate-key` | Generate a key pair on the YubiKey |
-| `create-csr` | Create a CSR signed by the YubiKey |
+| `create-csr` | Create a CSR signed by the YubiKey (requires `pin`) |
 | `import-certificate` | Write a certificate to a PIV slot |
+| `get-pin-retries` | Remaining PIN attempts (read-only, does not consume one) |
 
 ### PIV Slots
 
